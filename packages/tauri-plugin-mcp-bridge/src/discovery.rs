@@ -7,7 +7,7 @@
 ///
 /// # Arguments
 ///
-/// * `bind_address` - The address to bind to (e.g., "0.0.0.0" or "127.0.0.1")
+/// * `bind_address` - The loopback address to bind to (e.g., "127.0.0.1")
 /// * `base_port` - The starting port number to scan from
 ///
 /// # Returns

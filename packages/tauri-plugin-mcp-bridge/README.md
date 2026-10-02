@@ -53,20 +53,44 @@ fn main() {
 }
 ```
 
-### Custom Configuration
+### Security: loopback-only, token-authenticated
 
-By default, the plugin binds to `0.0.0.0` (all interfaces) to support remote device development. For localhost-only access:
+This fork hardens the WebSocket bridge, which can run arbitrary JS in the webview
+and invoke any Tauri command:
+
+- **Loopback only.** The server binds to `127.0.0.1`. Non-loopback bind addresses
+  are rejected at startup and replaced with `127.0.0.1`.
+- **Bearer token required.** The server reads a token from `MCP_BRIDGE_TOKEN`
+  (at least 32 chars of `[A-Za-z0-9_-]`). If it is missing or invalid, the
+  WebSocket server **does not start**. Clients must send
+  `Authorization: Bearer <token>`, otherwise they get HTTP 401.
+- **No browser clients.** Any handshake carrying an `Origin` header (including
+  `Origin: null`) is rejected with HTTP 403. This blocks web pages from driving
+  the app through cross-origin WebSockets.
+
+Start the Tauri app and the MCP server with the **same** token, e.g. in PowerShell:
+
+```powershell
+$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+$env:MCP_BRIDGE_TOKEN = [Convert]::ToBase64String($b).TrimEnd('=').Replace('+','-').Replace('/','_')
+```
+
+or in bash: `export MCP_BRIDGE_TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')`.
+
+To read the token from a different variable:
 
 ```rust
 use tauri_plugin_mcp_bridge::Builder;
 
 fn main() {
     tauri::Builder::default()
-        .plugin(Builder::new().bind_address("127.0.0.1").build())
+        .plugin(Builder::new().auth_token_env("MY_APP_MCP_TOKEN").build())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 ```
+
+The MCP server always reads `MCP_BRIDGE_TOKEN`.
 
 ## Features
 
@@ -172,24 +196,8 @@ The plugin runs a WebSocket server on port 9223 (or next available in range 9223
 
 ### Remote Device Development
 
-By default, the WebSocket server binds to `0.0.0.0` (all network interfaces), enabling connections from:
-
-- **iOS devices** on the same network
-- **Android devices** on the same network or via `adb reverse`
-- **Emulators/Simulators** via localhost
-
-#### Connecting from MCP Server
-
-The MCP server supports connecting to remote Tauri apps via the `driver_session` tool:
-
-```typescript
-// Connect to a Tauri app on a remote device
-driver_session({ action: 'start', host: '192.168.1.100' })
-
-// Or use environment variables:
-// MCP_BRIDGE_HOST=192.168.1.100 npx mcp-server-tauri
-// TAURI_DEV_HOST=192.168.1.100 npx mcp-server-tauri (same as Tauri CLI uses)
-```
+Not supported in this fork: the server only listens on loopback. Android
+emulators/devices can still reach it via `adb forward tcp:9223 tcp:9223`.
 
 #### Connection Strategy
 

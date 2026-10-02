@@ -10,10 +10,13 @@ use crate::script_registry::{ScriptEntry, ScriptType, SharedScriptRegistry};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{self, Value};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::{header, HeaderMap, StatusCode};
+use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 
 /// WebSocket server for real-time event streaming to MCP clients.
 ///
@@ -23,7 +26,8 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 ///
 /// # Architecture
 ///
-/// - Binds to 0.0.0.0 by default (all interfaces) for remote device support
+/// - Binds to loopback only (127.0.0.1)
+/// - Requires `Authorization: Bearer <token>` and rejects any `Origin` header
 /// - Runs on port 9223 by default (or next available in range 9223-9322)
 /// - Supports multiple concurrent client connections
 /// - Uses broadcast channels for event distribution
@@ -38,7 +42,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 /// async fn main() {
 ///     // Requires a Tauri AppHandle
 ///     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(100);
-///     let server = WebSocketServer::new(9223, "0.0.0.0", app_handle, event_tx);
+///     let server = WebSocketServer::new(9223, "127.0.0.1", app_handle, event_tx, token);
 ///
 ///     tokio::spawn(async move {
 ///         if let Err(e) = server.start().await {
@@ -51,6 +55,7 @@ pub struct WebSocketServer<R: Runtime> {
     addr: SocketAddr,
     event_tx: broadcast::Sender<String>,
     app: AppHandle<R>,
+    auth_token: Arc<str>,
 }
 
 impl<R: Runtime> WebSocketServer<R> {
@@ -59,9 +64,10 @@ impl<R: Runtime> WebSocketServer<R> {
     /// # Arguments
     ///
     /// * `port` - The port number to bind the server to (typically 9223)
-    /// * `bind_address` - The address to bind to (e.g., "0.0.0.0" or "127.0.0.1")
+    /// * `bind_address` - The loopback address to bind to (e.g., "127.0.0.1")
     /// * `app` - The Tauri application handle
     /// * `event_tx` - An external broadcast sender for distributing events
+    /// * `auth_token` - Bearer token clients must present in the `Authorization` header
     ///
     /// # Returns
     ///
@@ -73,13 +79,14 @@ impl<R: Runtime> WebSocketServer<R> {
     /// use tauri_plugin_mcp_bridge::websocket::WebSocketServer;
     ///
     /// let (event_tx, _event_rx) = tokio::sync::broadcast::channel(100);
-    /// let server = WebSocketServer::new(9223, "0.0.0.0", app_handle, event_tx);
+    /// let server = WebSocketServer::new(9223, "127.0.0.1", app_handle, event_tx, token);
     /// ```
     pub fn new(
         port: u16,
         bind_address: &str,
         app: AppHandle<R>,
         event_tx: broadcast::Sender<String>,
+        auth_token: Arc<str>,
     ) -> Self {
         let addr: SocketAddr = format!("{bind_address}:{port}").parse().unwrap();
 
@@ -87,6 +94,7 @@ impl<R: Runtime> WebSocketServer<R> {
             addr,
             event_tx,
             app,
+            auth_token,
         }
     }
 
@@ -109,7 +117,7 @@ impl<R: Runtime> WebSocketServer<R> {
     /// #[tokio::main]
     /// async fn main() {
     ///     // Requires a Tauri AppHandle
-    ///     let (server, _rx) = WebSocketServer::new(9223, "0.0.0.0", app_handle);
+    ///     let (server, _rx) = WebSocketServer::new(9223, "127.0.0.1", app_handle, event_tx, token);
     ///
     ///     tokio::spawn(async move {
     ///         if let Err(e) = server.start().await {
@@ -129,9 +137,10 @@ impl<R: Runtime> WebSocketServer<R> {
             let (stream, _) = listener.accept().await?;
             let event_tx = self.event_tx.clone();
             let app = self.app.clone();
+            let auth_token = self.auth_token.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, event_tx, app).await {
+                if let Err(e) = handle_connection(stream, event_tx, app, auth_token).await {
                     mcp_log_error("WS_SERVER", &format!("WebSocket connection error: {e}"));
                 }
             });
@@ -153,7 +162,7 @@ impl<R: Runtime> WebSocketServer<R> {
     /// use tauri_plugin_mcp_bridge::websocket::WebSocketServer;
     ///
     /// // Requires a Tauri AppHandle
-    /// let (server, _rx) = WebSocketServer::new(9223, "0.0.0.0", app_handle);
+    /// let (server, _rx) = WebSocketServer::new(9223, "127.0.0.1", app_handle, event_tx, token);
     /// server.broadcast("Hello, clients!");
     /// ```
     pub fn broadcast(&self, message: &str) {
@@ -652,12 +661,47 @@ fn is_benign_handshake_error(err: &tokio_tungstenite::tungstenite::Error) -> boo
     match err {
         Error::ConnectionClosed | Error::AlreadyClosed => true,
         Error::Protocol(ProtocolError::HandshakeIncomplete) => true,
+        // Handshake rejected by `check_handshake` (bad Origin / token); already answered.
+        Error::Http(_) => true,
         Error::Io(io_err) => matches!(
             io_err.kind(),
             ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof | ErrorKind::BrokenPipe
         ),
         _ => false,
     }
+}
+
+/// Validates WebSocket upgrade headers.
+///
+/// - Any `Origin` header (including `Origin: null`) is rejected with 403. Browsers
+///   always send one, native clients don't, so this blocks web pages from driving
+///   the app via cross-origin WebSocket connections.
+/// - A missing or wrong `Authorization: Bearer <token>` is rejected with 401.
+///
+/// Rejections never echo request headers back to the client.
+fn check_handshake(headers: &HeaderMap, expected_token: &str) -> Result<(), StatusCode> {
+    if headers.contains_key(header::ORIGIN) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let mut auth_values = headers.get_all(header::AUTHORIZATION).iter();
+    let presented = match (auth_values.next(), auth_values.next()) {
+        (Some(value), None) => value.as_bytes(),
+        _ => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    match presented.strip_prefix(b"Bearer ") {
+        Some(token) if constant_time_eq(token, expected_token.as_bytes()) => Ok(()),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+/// Compares two byte slices in time independent of where they differ.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Handles a single WebSocket client connection.
@@ -681,8 +725,21 @@ async fn handle_connection<R: Runtime>(
     stream: TcpStream,
     event_tx: broadcast::Sender<String>,
     app: AppHandle<R>,
+    auth_token: Arc<str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ws_stream = match accept_async(stream).await {
+    // Signature is dictated by tungstenite's `Callback` trait.
+    #[allow(clippy::result_large_err)]
+    let authorize = |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
+        match check_handshake(req.headers(), &auth_token) {
+            Ok(()) => Ok(res),
+            Err(status) => {
+                let mut err = ErrorResponse::new(None);
+                *err.status_mut() = status;
+                Err(err)
+            }
+        }
+    };
+    let ws_stream = match accept_hdr_async(stream, authorize).await {
         Ok(ws_stream) => ws_stream,
         // A client that opens the TCP connection but drops before completing the WebSocket
         // upgrade (port probes, health checks, browsers/agents reconnecting) surfaces here as a
@@ -897,4 +954,60 @@ pub fn inject_all_scripts<R: Runtime>(
     }
 
     Ok(scripts.len())
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+    const TOKEN: &str = "abcdefghijklmnopqrstuvwxyz0123456789_-";
+
+    fn headers(pairs: &[(header::HeaderName, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(name.clone(), HeaderValue::from_str(value).unwrap());
+        }
+        map
+    }
+
+    fn bearer(token: &str) -> String {
+        format!("Bearer {token}")
+    }
+
+    #[test]
+    fn accepts_correct_token_without_origin() {
+        let h = headers(&[(header::AUTHORIZATION, &bearer(TOKEN))]);
+        assert_eq!(check_handshake(&h, TOKEN), Ok(()));
+    }
+
+    #[test]
+    fn rejects_any_origin_even_with_correct_token() {
+        for origin in ["http://evil.example", "null", ""] {
+            let h = headers(&[
+                (header::AUTHORIZATION, &bearer(TOKEN)),
+                (header::ORIGIN, origin),
+            ]);
+            assert_eq!(check_handshake(&h, TOKEN), Err(StatusCode::FORBIDDEN));
+        }
+    }
+
+    #[test]
+    fn rejects_missing_or_wrong_token() {
+        let wrong = format!("{TOKEN}x");
+        let cases = [
+            headers(&[]),
+            headers(&[(header::AUTHORIZATION, TOKEN)]),
+            headers(&[(header::AUTHORIZATION, &bearer(&wrong))]),
+            headers(&[(header::AUTHORIZATION, &bearer(&TOKEN[1..]))]),
+            headers(&[(header::AUTHORIZATION, &format!("bearer {TOKEN}"))]),
+            headers(&[
+                (header::AUTHORIZATION, &bearer(TOKEN)),
+                (header::AUTHORIZATION, &bearer(TOKEN)),
+            ]),
+        ];
+        for h in &cases {
+            assert_eq!(check_handshake(h, TOKEN), Err(StatusCode::UNAUTHORIZED));
+        }
+    }
 }

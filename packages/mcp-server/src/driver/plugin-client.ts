@@ -1,7 +1,24 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 
-import { buildWebSocketURL, getDefaultHost, getDefaultPort } from '../config.js';
+import { buildWebSocketURL, getBridgeToken, getDefaultHost, getDefaultPort } from '../config.js';
+
+const MISSING_TOKEN_MESSAGE = 'MCP_BRIDGE_TOKEN is not set. Start the MCP server and the Tauri app with the same '
+   + 'MCP_BRIDGE_TOKEN environment variable.';
+
+/**
+ * Replaces the generic `ws` handshake failure with an actionable message.
+ * Never includes the token or request headers.
+ */
+function describeConnectionError(err: Error): Error {
+   if (err.message.includes('Unexpected server response: 401')) {
+      return new Error('MCP Bridge rejected authentication: MCP_BRIDGE_TOKEN does not match the Tauri app token.');
+   }
+   if (err.message.includes('Unexpected server response: 403')) {
+      return new Error('MCP Bridge rejected the connection (Origin header not allowed).');
+   }
+   return err;
+}
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000,
       DEFAULT_HEARTBEAT_TIMEOUT_MS = 10000,
@@ -112,7 +129,15 @@ export class PluginClient extends EventEmitter {
             return;
          }
 
-         this._ws = new WebSocket(this._url);
+         const token = getBridgeToken();
+
+         if (!token) {
+            reject(new Error(MISSING_TOKEN_MESSAGE));
+            return;
+         }
+
+         // The token travels only in the Authorization header: never in the URL or logs.
+         this._ws = new WebSocket(this._url, { headers: { Authorization: `Bearer ${token}` } });
 
          this._ws.on('open', () => {
             // Connected to MCP Bridge plugin
@@ -151,8 +176,10 @@ export class PluginClient extends EventEmitter {
          this._ws.on('error', (err) => {
             // WebSocket error - emit for any listeners, then reject the promise.
             // Note: The constructor attaches a default error handler to prevent crashes.
-            this.emit('error', err);
-            reject(err);
+            const described = describeConnectionError(err);
+
+            this.emit('error', described);
+            reject(described);
          });
 
          this._ws.on('close', () => {

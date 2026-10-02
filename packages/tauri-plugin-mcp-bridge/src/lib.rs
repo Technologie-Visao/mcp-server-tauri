@@ -155,8 +155,21 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 ///     .expect("error while running tauri application");
 /// ```
 pub fn init_with_config<R: Runtime>(config: Config) -> TauriPlugin<R> {
-    let bind_address = config.bind_address.clone();
+    let bind_address = if config::is_loopback_address(&config.bind_address) {
+        config.bind_address.clone()
+    } else {
+        mcp_log_error(
+            "PLUGIN",
+            &format!(
+                "Refusing non-loopback bind address '{}'; using {}",
+                config.bind_address,
+                config::DEFAULT_BIND_ADDRESS
+            ),
+        );
+        config::DEFAULT_BIND_ADDRESS.to_string()
+    };
     let base_port = config.base_port;
+    let auth_token_env = config.auth_token_env.clone();
 
     PluginBuilder::<R>::new("mcp-bridge")
         .invoke_handler(tauri::generate_handler![
@@ -187,6 +200,21 @@ pub fn init_with_config<R: Runtime>(config: Config) -> TauriPlugin<R> {
             let script_registry = create_shared_registry();
             app.manage(script_registry);
 
+            // Never start the WebSocket server without a valid token. The error
+            // message describes the problem but never includes the token value.
+            let auth_token: Arc<str> = match config::load_token(&auth_token_env) {
+                Ok(token) => token.into(),
+                Err(e) => {
+                    mcp_log_error(
+                        "PLUGIN",
+                        &format!(
+                            "MCP Bridge WebSocket server NOT started: {auth_token_env} invalid ({e})"
+                        ),
+                    );
+                    return Ok(());
+                }
+            };
+
             // Find an available port for WebSocket server
             let port = find_available_port(&bind_address, base_port);
 
@@ -209,7 +237,7 @@ pub fn init_with_config<R: Runtime>(config: Config) -> TauriPlugin<R> {
             // Start WebSocket server in background
             let app_handle = app.clone();
             let ws_server =
-                websocket::WebSocketServer::new(port, &bind_address, app_handle, event_tx);
+                websocket::WebSocketServer::new(port, &bind_address, app_handle, event_tx, auth_token);
 
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = ws_server.start().await {

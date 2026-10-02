@@ -1,4 +1,12 @@
+import { randomBytes } from 'crypto';
 import { defineConfig } from 'vitest/config';
+
+const TOKEN_BYTES = 32;
+
+// The bridge refuses to start without a token. Generate a fresh one per run and
+// export it so both the globally spawned test-app and the test workers inherit it.
+// eslint-disable-next-line no-process-env
+process.env.MCP_BRIDGE_TOKEN ||= randomBytes(TOKEN_BYTES).toString('base64url');
 
 export default defineConfig({
    test: {

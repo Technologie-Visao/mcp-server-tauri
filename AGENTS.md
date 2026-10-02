@@ -66,6 +66,8 @@ Create `.mcp.json` at the workspace root (it's covered by a global `.gitignore` 
 
 This registers a project-scoped MCP server named `tauri-dev` that runs the local-built `packages/mcp-server/dist/index.js`, so edits to the MCP server show up the next time the agent reconnects. Do **not** invoke the published `mcp-server-tauri` from the global config for dev work — those tools run a different build.
 
+The bridge requires a shared bearer token. Before starting either side, set the same `MCP_BRIDGE_TOKEN` (32+ chars of `[A-Za-z0-9_-]`) in the shell that runs `npm run dev` **and** the shell that launches Claude Code. The spawned MCP server inherits it. Without it the bridge does not listen and `driver_session start` fails. Never put the token in `.mcp.json`, command arguments, or logs.
+
 Workflow:
 
 1. Run `npm run dev` in a terminal. This starts the `tsc --watch` rebuild of `packages/mcp-server/dist/` and `tauri dev` for `test-app` on port 9300.

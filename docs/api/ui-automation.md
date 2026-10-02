@@ -209,16 +209,13 @@ The `identifier` field contains the app's bundle ID (e.g., `com.example.my-app`)
 - **`MCP_BRIDGE_HOST`** - Default host when `host` parameter not provided
 - **`TAURI_DEV_HOST`** - Fallback host (same as Tauri CLI uses for mobile dev)
 - **`MCP_BRIDGE_PORT`** - Default port when `port` parameter not provided
+- **`MCP_BRIDGE_TOKEN`** - Required. Bearer token shared with the Tauri app; connections fail without it
 
 ### Remote Device Setup
 
-For real iOS/Android devices on the network:
+The Tauri plugin only listens on loopback (`127.0.0.1`), so devices on the network cannot connect directly.
 
-1. Ensure your development machine and device are on the same network
-2. The Tauri plugin binds to `0.0.0.0` by default, allowing remote connections
-3. Use the device's IP address as the `host` parameter
-
-**Android alternative**: Use `adb reverse tcp:9223 tcp:9223` to forward the port, then connect to localhost.
+**Android**: Use `adb forward tcp:9223 tcp:9223` to forward the port, then connect to localhost.
 
 **Note**: No external driver process required.
 

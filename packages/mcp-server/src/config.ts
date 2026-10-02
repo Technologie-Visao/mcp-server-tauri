@@ -38,6 +38,20 @@ export function getDefaultPort(): number {
 }
 
 /**
+ * Gets the bearer token used to authenticate with the MCP Bridge plugin.
+ *
+ * Read from the MCP_BRIDGE_TOKEN environment variable, which must hold the same
+ * value the Tauri app was started with. Returns null when unset or empty.
+ * The token is sent only in the WebSocket `Authorization` header; never log it.
+ */
+export function getBridgeToken(): string | null {
+   // eslint-disable-next-line no-process-env
+   const token = process.env.MCP_BRIDGE_TOKEN;
+
+   return token && token.length > 0 ? token : null;
+}
+
+/**
  * Gets the CWD hint used to route tool calls to the right Tauri instance
  * when multiple are connected at once.
  *

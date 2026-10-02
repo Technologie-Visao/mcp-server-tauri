@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { getCwdHint, getDefaultHost, getDefaultPort, getConfig, buildWebSocketURL } from '../../src/config.js';
+import { getBridgeToken, getCwdHint, getDefaultHost, getDefaultPort, getConfig, buildWebSocketURL } from '../../src/config.js';
 
 describe('config', () => {
    const originalEnv = process.env;
@@ -13,10 +13,24 @@ describe('config', () => {
       delete process.env.MCP_BRIDGE_PORT;
       delete process.env.MCP_BRIDGE_CWD;
       delete process.env.TAURI_DEV_HOST;
+      delete process.env.MCP_BRIDGE_TOKEN;
    });
 
    afterEach(() => {
       process.env = originalEnv;
+   });
+
+   describe('getBridgeToken', () => {
+      it('returns null when unset or empty', () => {
+         expect(getBridgeToken()).toBeNull();
+         process.env.MCP_BRIDGE_TOKEN = '';
+         expect(getBridgeToken()).toBeNull();
+      });
+
+      it('returns MCP_BRIDGE_TOKEN when set', () => {
+         process.env.MCP_BRIDGE_TOKEN = 'secret-token';
+         expect(getBridgeToken()).toBe('secret-token');
+      });
    });
 
    describe('getDefaultHost', () => {

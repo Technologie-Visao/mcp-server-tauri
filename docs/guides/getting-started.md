@@ -74,8 +74,10 @@ Once changes are approved and made:
 ## Notes
 
 - The plugin only runs in debug builds so it won't affect production
-- The WebSocket server binds to \`0.0.0.0:9223\` by default
-- For localhost-only access, use \`Builder::new().bind_address("127.0.0.1").build()\``;
+- The WebSocket server only binds to \`127.0.0.1\` (port 9223 or the next free one)
+- The app and the MCP server must share the same \`MCP_BRIDGE_TOKEN\` env var (32+ chars of \`[A-Za-z0-9_-]\`)
+- Without a valid token the bridge does not start
+- Connections carrying an \`Origin\` header (i.e. from browsers) are rejected`;
 </script>
 
 # Getting Started with MCP Server Tauri

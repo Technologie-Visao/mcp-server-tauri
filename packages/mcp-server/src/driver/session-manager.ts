@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { getCwdHint, getDefaultHost, getDefaultPort } from '../config.js';
+import { getBridgeToken, getCwdHint, getDefaultHost, getDefaultPort } from '../config.js';
 import { AppDiscovery } from './app-discovery.js';
 import { PluginClient } from './plugin-client.js';
 import { resetInitialization } from './webview-executor.js';
@@ -385,6 +385,11 @@ async function handleStatusAction(): Promise<string> {
 }
 
 async function handleStartAction(host?: string, port?: number): Promise<string> {
+   if (!getBridgeToken()) {
+      return 'Session start failed - MCP_BRIDGE_TOKEN is not set. Start the MCP server and the Tauri app '
+         + 'with the same MCP_BRIDGE_TOKEN environment variable.';
+   }
+
    const configuredHost = host ?? getDefaultHost();
 
    const configuredPort = port ?? getDefaultPort();
@@ -393,21 +398,30 @@ async function handleStartAction(host?: string, port?: number): Promise<string> 
       return `Already connected to app on port ${configuredPort}`;
    }
 
-   let connectedSession: { name: string; host: string; port: number } | null = null;
+   let connectedSession: { name: string; host: string; port: number } | null = null,
+       authFailure: string | null = null;
+
+   const recordAuthFailure = (error: unknown): void => {
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (message.includes('MCP Bridge rejected')) {
+         authFailure = message;
+      }
+   };
 
    if (configuredHost !== 'localhost' && configuredHost !== '127.0.0.1') {
       try {
          connectedSession = await tryConnect('localhost', configuredPort);
-      } catch{
-         // ignore
+      } catch(error) {
+         recordAuthFailure(error);
       }
    }
 
    if (!connectedSession) {
       try {
          connectedSession = await tryConnect(configuredHost, configuredPort);
-      } catch{
-         // ignore
+      } catch(error) {
+         recordAuthFailure(error);
       }
    }
 
@@ -423,6 +437,10 @@ async function handleStartAction(host?: string, port?: number): Promise<string> 
             // ignore
          }
       }
+   }
+
+   if (!connectedSession && authFailure) {
+      return `Session start failed - ${authFailure}`;
    }
 
    if (!connectedSession) {
